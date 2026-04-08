@@ -22,7 +22,7 @@ spec:
     spec:
       securityContext:
         runAsNonRoot: true
-        runAsUser: 65534   # nobody
+        runAsUser: 65534
         runAsGroup: 65534
         seccompProfile:
           type: RuntimeDefault
@@ -37,23 +37,18 @@ spec:
           env:
             # --- Required ---
             # Comma-separated list of host:port targets to probe.
-            # Example: "1.2.3.4:443,example.com:80,10.0.0.1:8080"
+            # Example: "1.2.3.4:443,example.com:80,10.0.0.1:8080,[1234:1:2:3:4::]:443"
             - name: TARGETS
-              value: "1.2.3.4:443,example.com:80"
-
-            # --- Optional ---
+              value: "127.0.0.1:9090"
             # Check interval in seconds (default: 60)
             - name: INTERVAL
               value: "60"
-
             # TCP dial timeout in seconds (default: 5)
             - name: TIMEOUT
               value: "5"
-
             # Metrics server listen address (default: :9090)
             - name: LISTEN_ADDR
               value: ":9090"
-
             # Log verbosity: debug | info | warn | error (default: info)
             - name: LOG_LEVEL
               value: "info"
@@ -82,4 +77,4 @@ spec:
             capabilities:
               drop:
                 - ALL
-
+                - CAP_NET_RAW
