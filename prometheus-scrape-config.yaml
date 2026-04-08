@@ -1,0 +1,61 @@
+# prometheus-scrape-config.yaml
+#
+# Example Prometheus scrape configuration for connectivity-exporter.
+# Uses Kubernetes pod discovery (kubernetes_sd_configs) and relies on
+# the annotations set on the Pod:
+#
+#   prometheus.io/scrape: "true"
+#   prometheus.io/port:   "9090"
+#   prometheus.io/path:   "/metrics"
+#
+# Add this block to the `scrape_configs:` section of your prometheus.yml,
+# or create a separate file and include it via --config.file or the
+# rule_files / scrape_config_files mechanism (Prometheus >= 2.43).
+
+scrape_configs:
+  - job_name: connectivity-exporter
+
+    # Only scrape pods that have opted in via annotation.
+    kubernetes_sd_configs:
+      - role: pod
+        # Restrict discovery to a single namespace.
+        # Remove or adjust if the exporter runs in a different namespace.
+        namespaces:
+          names:
+            - connectivity-exporter
+
+    relabel_configs:
+      # Drop pods that do not have prometheus.io/scrape: "true"
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+        action: keep
+        regex: "true"
+
+      # Use prometheus.io/path if set, otherwise default to /metrics
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+        action: replace
+        target_label: __metrics_path__
+        regex: (.+)
+
+      # Use prometheus.io/port if set, otherwise keep the discovered port
+      - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+        action: replace
+        regex: "([^:]+)(?::\\d+)?;(\\d+)"
+        replacement: "$1:$2"
+        target_label: __address__
+
+      # Expose useful Kubernetes metadata as labels on every time series
+      - source_labels: [__meta_kubernetes_namespace]
+        action: replace
+        target_label: namespace
+
+      - source_labels: [__meta_kubernetes_pod_name]
+        action: replace
+        target_label: pod
+
+      - source_labels: [__meta_kubernetes_pod_label_app]
+        action: replace
+        target_label: app
+
+      - source_labels: [__meta_kubernetes_pod_node_name]
+        action: replace
+        target_label: node
