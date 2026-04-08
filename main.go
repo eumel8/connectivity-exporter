@@ -99,10 +99,20 @@ func main() {
 
 	targets := []string{}
 	for _, t := range strings.Split(rawTargets, ",") {
+		// Strip surrounding whitespace and any surrounding quotes that shells
+		// or Kubernetes YAML may introduce around IPv6 addresses, e.g.
+		//   "[2001:db8::1]:443"  →  [2001:db8::1]:443
 		t = strings.TrimSpace(t)
-		if t != "" {
-			targets = append(targets, t)
+		t = strings.Trim(t, `"`)
+		if t == "" {
+			continue
 		}
+		// Validate the address is a parseable host:port before accepting it.
+		if _, err := net.ResolveTCPAddr("tcp", t); err != nil {
+			slog.Error("invalid target, skipping", "target", t, "error", err)
+			continue
+		}
+		targets = append(targets, t)
 	}
 	if len(targets) == 0 {
 		slog.Error("no valid targets found in TARGETS")
