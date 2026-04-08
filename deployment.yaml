@@ -1,0 +1,85 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: connectivity-exporter
+  labels:
+    app: connectivity-exporter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: connectivity-exporter
+  template:
+    metadata:
+      labels:
+        app: connectivity-exporter
+      annotations:
+        # Prometheus auto-scrape annotations (used by kube-prometheus / Prometheus Operator)
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534   # nobody
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: connectivity-exporter
+          image: ghcr.io/eumel8/connectivity-exporter:latest
+          imagePullPolicy: Always
+          ports:
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+          env:
+            # --- Required ---
+            # Comma-separated list of host:port targets to probe.
+            # Example: "1.2.3.4:443,example.com:80,10.0.0.1:8080"
+            - name: TARGETS
+              value: "1.2.3.4:443,example.com:80"
+
+            # --- Optional ---
+            # Check interval in seconds (default: 60)
+            - name: INTERVAL
+              value: "60"
+
+            # TCP dial timeout in seconds (default: 5)
+            - name: TIMEOUT
+              value: "5"
+
+            # Metrics server listen address (default: :9090)
+            - name: LISTEN_ADDR
+              value: ":9090"
+
+            # Log verbosity: debug | info | warn | error (default: info)
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+
