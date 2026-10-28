@@ -1,6 +1,6 @@
 module github.com/eumel8/connectivity-exporter
 
-go 1.25.0
+go 1.27.3
 
 require github.com/prometheus/client_golang v1.23.2
 
