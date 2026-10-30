@@ -21,6 +21,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Test target refresh with race detector
+        run: go test -race ./...
+
       - name: Create kind cluster
         uses: helm/kind-action@v1.15.1
         with:
@@ -46,5 +54,4 @@ jobs:
           kubectl --context kind-connectivity-e2e -n connectivity-e2e describe pods || true
           kubectl --context kind-connectivity-e2e -n connectivity-e2e get events --sort-by=.lastTimestamp || true
           kubectl --context kind-connectivity-e2e -n connectivity-e2e logs deployment/nginx --all-containers=true || true
-          kubectl --context kind-connectivity-e2e -n connectivity-e2e logs deployment/connectivity-exporter -c fetch-targets || true
           kubectl --context kind-connectivity-e2e -n connectivity-e2e logs deployment/connectivity-exporter -c connectivity-exporter || true

@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -71,26 +72,62 @@ func checkTarget(target string, timeout time.Duration) {
 }
 
 // runChecks continuously checks all targets at the given interval.
-func runChecks(targets []string, interval, timeout time.Duration) {
+func runChecks(targets *targetSet, interval, timeout time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	// Run an initial check immediately on startup.
-	for _, t := range targets {
-		checkTarget(t, timeout)
-	}
+	targets.check(timeout)
 
 	for range ticker.C {
-		for _, t := range targets {
-			go checkTarget(t, timeout)
-		}
+		targets.check(timeout)
 	}
 }
 
-// parseTargets validates a comma-separated list of host:port targets.
+// targetSet serializes replacements with checks so an in-flight check cannot
+// recreate metrics belonging to a removed target.
+type targetSet struct {
+	mu      sync.RWMutex
+	targets []string
+}
+
+func (s *targetSet) check(timeout time.Duration) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var checks sync.WaitGroup
+	for _, target := range s.targets {
+		checks.Add(1)
+		go func() {
+			defer checks.Done()
+			checkTarget(target, timeout)
+		}()
+	}
+	checks.Wait()
+}
+
+func (s *targetSet) replace(targets []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	active := make(map[string]bool, len(targets))
+	for _, target := range targets {
+		active[target] = true
+	}
+	for _, target := range s.targets {
+		if !active[target] {
+			connectivityUp.DeleteLabelValues(target)
+			connectivityLatencySeconds.DeleteLabelValues(target)
+			connectivityChecksTotal.DeleteLabelValues(target, "success")
+			connectivityChecksTotal.DeleteLabelValues(target, "failure")
+		}
+	}
+	s.targets = targets
+}
+
+// parseTargets validates a comma- or newline-separated list of host:port targets.
 func parseTargets(rawTargets string) []string {
 	targets := []string{}
-	for _, t := range strings.Split(rawTargets, ",") {
+	seen := make(map[string]bool)
+	for _, t := range strings.Split(strings.ReplaceAll(rawTargets, "\n", ","), ",") {
 		// Strip surrounding whitespace and any surrounding quotes that shells
 		// or Kubernetes YAML may introduce around IPv6 addresses, e.g.
 		//   "[2001:db8::1]:443"  →  [2001:db8::1]:443
@@ -104,7 +141,10 @@ func parseTargets(rawTargets string) []string {
 			slog.Error("invalid target, skipping", "target", t, "error", err)
 			continue
 		}
-		targets = append(targets, t)
+		if !seen[t] {
+			targets = append(targets, t)
+			seen[t] = true
+		}
 	}
 	return targets
 }
@@ -129,10 +169,6 @@ func main() {
 	if len(targets) == 0 {
 		// TARGETS: comma-separated list of host:port, e.g. "1.2.3.4:443,example.com:80"
 		targets = parseTargets(os.Getenv("TARGETS"))
-	}
-	if len(targets) == 0 {
-		slog.Error("no valid targets found in TARGETS_FILE or TARGETS")
-		os.Exit(1)
 	}
 
 	// INTERVAL: check interval in seconds (default: 60)
@@ -174,6 +210,32 @@ func main() {
 	}
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel})))
 
+	pollInterval := 300 * time.Second
+	if v := os.Getenv("TARGETS_POLL_INTERVAL"); v != "" {
+		secs, err := strconv.Atoi(v)
+		if err != nil || secs <= 0 || secs > 86400 {
+			slog.Warn("invalid TARGETS_POLL_INTERVAL, using default", "value", v)
+		} else {
+			pollInterval = time.Duration(secs) * time.Second
+		}
+	}
+	source := targetSource{url: os.Getenv("TARGETS_URL"), client: &http.Client{Timeout: 15 * time.Second}}
+	if source.url != "" {
+		if downloaded, err := source.fetch(); err != nil {
+			slog.Warn("target download failed, using startup fallback", "error", err)
+		} else {
+			targets = downloaded
+		}
+	}
+	if len(targets) == 0 {
+		slog.Error("no valid targets found in TARGETS_URL, TARGETS_FILE or TARGETS")
+		os.Exit(1)
+	}
+	activeTargets := &targetSet{targets: targets}
+	if source.url != "" {
+		go source.poll(activeTargets, pollInterval)
+	}
+
 	slog.Info("connectivity-exporter starting",
 		"targets", targets,
 		"interval", interval,
@@ -182,7 +244,7 @@ func main() {
 	)
 
 	// Start background check loop.
-	go runChecks(targets, interval, timeout)
+	go runChecks(activeTargets, interval, timeout)
 
 	// Expose /metrics and a minimal /healthz endpoint.
 	mux := http.NewServeMux()

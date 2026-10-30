@@ -43,7 +43,9 @@ All configuration is done through environment variables.
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `TARGETS` | unless `TARGETS_FILE` provides valid targets | — | Comma-separated list of `host:port` targets, e.g. `1.2.3.4:443,example.com:80`; fallback for `TARGETS_FILE` |
+| `TARGETS` | unless URL or file provides valid targets at startup | — | Comma-separated list of `host:port` targets, e.g. `1.2.3.4:443,example.com:80`; startup fallback |
+| `TARGETS_URL` | no | — | HTTP(S) URL serving a plain-text target list; overrides file/env targets and refreshes automatically |
+| `TARGETS_POLL_INTERVAL` | no | `300` | Refresh interval in seconds (1–86400), with ±20% random jitter |
 | `TARGETS_FILE` | no | — | Path to a plain-text target list; valid targets override `TARGETS`. Supports one target per line or comma-separated targets |
 | `INTERVAL` | no | `60` | Check interval in seconds |
 | `TIMEOUT` | no | `5` | TCP dial timeout per target in seconds |
@@ -81,7 +83,7 @@ ghcr.io/eumel8/connectivity-exporter:1.0.0
 The Dockerfile uses a two-stage build:
 
 1. **Builder** — `golang:1.25-alpine` compiles a statically linked binary.
-2. **Final** — `scratch` base image; contains only the binary, running as UID
+2. **Final** — `scratch` base image; contains the binary and CA certificates, running as UID
    `65534` (nobody).
 
 ## Kubernetes deployment
@@ -89,22 +91,19 @@ The Dockerfile uses a two-stage build:
 ### Deploy
 
 Edit the `TARGETS` value in `deployment.yaml` to match your fallback endpoints.
-Optionally set `TARGETS_URL` in the `fetch-targets` init container to an HTTP(S)
+Optionally set `TARGETS_URL` in the exporter container to an HTTP(S)
 URL serving a plain-text target list, then apply:
 
 ```bash
 kubectl apply -f deployment.yaml
 ```
 
-### Download targets at startup
+### Automatic target refresh
 
-The `fetch-targets` init container downloads `TARGETS_URL` into a shared
-`emptyDir` volume. The exporter reads that file using `TARGETS_FILE` at startup:
-
-1. If the file contains valid targets, they replace the deployment's `TARGETS`.
-2. If the URL is unset, the download fails, or the file is empty, unreadable,
-   or contains no valid targets, the exporter uses `TARGETS` instead.
-3. If neither source provides valid targets, the exporter exits with an error.
+The exporter downloads `TARGETS_URL` itself; no init container or shared volume
+is needed. Startup priority is `TARGETS_URL` → `TARGETS_FILE` → `TARGETS`.
+The optional `TARGETS_FILE` remains supported as a startup-only fallback for
+existing installations. If no source provides valid targets, startup fails.
 
 Example file served by the source server:
 
@@ -118,17 +117,29 @@ Comma-separated targets are also supported. Blank entries are ignored; invalid
 targets are logged and skipped. A file with some valid targets still overrides
 the entire fallback list; the lists are not merged.
 
-The download has a 5-second connection timeout and a 15-second total timeout.
-Failed downloads are discarded, including partially received files. A download
-failure does not fail the init container, allowing the exporter to use its
-fallback targets.
+After the initial download, the exporter refreshes at `TARGETS_POLL_INTERVAL`
+(default: 300 seconds), randomized by ±20% on each request to spread load across
+clusters. The first request happens immediately at startup. Downloads have a
+15-second total HTTP timeout and a maximum size of 1 MiB. HTTPS uses the bundled
+CA certificates; a custom trust bundle can be mounted and selected via Go's
+`SSL_CERT_FILE` environment variable.
 
-Containers exchange the target list through a file rather than modifying each
-other's environment. This also works with the exporter's shell-free `scratch`
-image. See the [Kubernetes init container documentation](https://kubernetes.io/docs/concepts/workloads/pods/init-containers/#differences-from-regular-containers).
+When supplied by the server, `ETag` is sent back as `If-None-Match`; otherwise
+`Last-Modified` is used with `If-Modified-Since`. HTTP 304 keeps the active list
+without downloading a body. Servers without validators work with regular GETs.
+See [RFC 9110 conditional requests](https://www.rfc-editor.org/rfc/rfc9110.html#section-13).
 
-Targets are fetched during Pod initialization only. Changes on the source
-server require recreating the Pod to download the updated list.
+Successful updates replace the active list without a Pod restart. Metrics for
+removed targets disappear; counters for retained targets continue. Existing
+checks finish before a replacement is applied, and new targets are probed on
+the next check cycle. Failed, empty, oversized, truncated, or entirely invalid
+responses keep the last accepted list (or the startup fallback until the first
+successful download). The last accepted list is held in memory, not persisted
+across process restarts. An empty file does not disable all probes.
+
+When upgrading from v0.1.0, move `TARGETS_URL` from the init container to the
+exporter container and remove the `fetch-targets` init container, shared volume,
+and `TARGETS_FILE` setting if they were used only for downloading targets.
 
 ### Created resources
 
@@ -200,11 +211,15 @@ An nginx Deployment serves a mounted text file containing its own Pod IP and
 port. The test deploys the real `deployment.yaml` with that target URL, then
 queries the exporter's `/metrics` endpoint from a separate curl Pod. It checks
 that the downloaded target is up, has non-negative latency and successful
-checks, and that the fallback target is absent. It repeats the checks with an
-empty file and an HTTP 404 response to verify fallback to `TARGETS`.
+checks, and that the fallback target is absent. It changes the served file and
+verifies live target replacement, removal of old metrics, preservation during
+empty/invalid/HTTP 404 responses, recovery and conditional HTTP 304 requests.
+Pod UID and restart count prove that updates require no restart. Separate
+startup cases verify fallback to `TARGETS` with an empty file and HTTP 404.
+Go tests with the race detector cover validators and metric cleanup.
 
 Any failed assertion or rollout timeout fails the job. On failure, Pod details,
-events, nginx logs, and exporter/init-container logs are printed for diagnosis.
+events, nginx logs, and exporter logs are printed for diagnosis.
 
 ## Repository structure
 
