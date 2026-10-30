@@ -1,0 +1,50 @@
+name: E2E
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    name: E2E (Kubernetes 1.36)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1.15.1
+        with:
+          version: v0.33.0
+          kubectl_version: v1.36.4
+          node_image: kindest/node:v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed
+          cluster_name: connectivity-e2e
+          wait: 120s
+
+      - name: Build and load exporter image
+        run: |
+          docker build --tag connectivity-exporter:e2e .
+          kind load docker-image connectivity-exporter:e2e --name connectivity-e2e
+
+      - name: Test downloaded targets and fallback metrics
+        run: bash .github/e2e/run.sh
+
+      - name: Collect diagnostics on failure
+        if: failure()
+        run: |
+          kubectl --context kind-connectivity-e2e get nodes -o wide || true
+          kubectl --context kind-connectivity-e2e get pods -A -o wide || true
+          kubectl --context kind-connectivity-e2e -n connectivity-e2e describe pods || true
+          kubectl --context kind-connectivity-e2e -n connectivity-e2e get events --sort-by=.lastTimestamp || true
+          kubectl --context kind-connectivity-e2e -n connectivity-e2e logs deployment/nginx --all-containers=true || true
+          kubectl --context kind-connectivity-e2e -n connectivity-e2e logs deployment/connectivity-exporter -c fetch-targets || true
+          kubectl --context kind-connectivity-e2e -n connectivity-e2e logs deployment/connectivity-exporter -c connectivity-exporter || true

@@ -87,16 +87,8 @@ func runChecks(targets []string, interval, timeout time.Duration) {
 	}
 }
 
-func main() {
-	// --- Configuration via environment variables ---
-
-	// TARGETS: comma-separated list of host:port, e.g. "1.2.3.4:443,example.com:80"
-	rawTargets := os.Getenv("TARGETS")
-	if rawTargets == "" {
-		slog.Error("TARGETS environment variable is not set or empty")
-		os.Exit(1)
-	}
-
+// parseTargets validates a comma-separated list of host:port targets.
+func parseTargets(rawTargets string) []string {
 	targets := []string{}
 	for _, t := range strings.Split(rawTargets, ",") {
 		// Strip surrounding whitespace and any surrounding quotes that shells
@@ -114,8 +106,32 @@ func main() {
 		}
 		targets = append(targets, t)
 	}
+	return targets
+}
+
+func main() {
+	// --- Configuration via environment variables ---
+
+	// TARGETS_FILE: optional downloaded targets, one per line or comma-separated.
+	// Fall back to TARGETS if the file is unreadable, empty, or has no valid targets.
+	var targets []string
+	if path := os.Getenv("TARGETS_FILE"); path != "" {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			slog.Warn("cannot read TARGETS_FILE, falling back to TARGETS", "path", path, "error", err)
+		} else {
+			targets = parseTargets(strings.ReplaceAll(string(data), "\n", ","))
+			if len(targets) == 0 {
+				slog.Warn("no valid targets in TARGETS_FILE, falling back to TARGETS", "path", path)
+			}
+		}
+	}
 	if len(targets) == 0 {
-		slog.Error("no valid targets found in TARGETS")
+		// TARGETS: comma-separated list of host:port, e.g. "1.2.3.4:443,example.com:80"
+		targets = parseTargets(os.Getenv("TARGETS"))
+	}
+	if len(targets) == 0 {
+		slog.Error("no valid targets found in TARGETS_FILE or TARGETS")
 		os.Exit(1)
 	}
 

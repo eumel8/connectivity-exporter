@@ -1,0 +1,15 @@
+spec:
+  template:
+    spec:
+      initContainers:
+        - name: fetch-targets
+          env:
+            - name: TARGETS_URL
+              value: http://nginx/targets.txt
+      containers:
+        - name: connectivity-exporter
+          image: connectivity-exporter:e2e
+          imagePullPolicy: Never
+          env:
+            - name: INTERVAL
+              value: "1"
