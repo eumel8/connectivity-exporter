@@ -43,7 +43,8 @@ All configuration is done through environment variables.
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `TARGETS` | yes | — | Comma-separated list of `host:port` targets, e.g. `1.2.3.4:443,example.com:80` |
+| `TARGETS` | unless `TARGETS_FILE` provides valid targets | — | Comma-separated list of `host:port` targets, e.g. `1.2.3.4:443,example.com:80`; fallback for `TARGETS_FILE` |
+| `TARGETS_FILE` | no | — | Path to a plain-text target list; valid targets override `TARGETS`. Supports one target per line or comma-separated targets |
 | `INTERVAL` | no | `60` | Check interval in seconds |
 | `TIMEOUT` | no | `5` | TCP dial timeout per target in seconds |
 | `LISTEN_ADDR` | no | `:9090` | Address the metrics HTTP server binds to |
@@ -87,12 +88,49 @@ The Dockerfile uses a two-stage build:
 
 ### Deploy
 
-Edit the `TARGETS` value in `deployment.yaml` to match your endpoints, then
-apply:
+Edit the `TARGETS` value in `deployment.yaml` to match your fallback endpoints.
+Optionally set `TARGETS_URL` in the `fetch-targets` init container to an HTTP(S)
+URL serving a plain-text target list, then apply:
 
 ```bash
 kubectl apply -f deployment.yaml
 ```
+
+### Download targets at startup
+
+The `fetch-targets` init container downloads `TARGETS_URL` into a shared
+`emptyDir` volume. The exporter reads that file using `TARGETS_FILE` at startup:
+
+1. If the file contains valid targets, they replace the deployment's `TARGETS`.
+2. If the URL is unset, the download fails, or the file is empty, unreadable,
+   or contains no valid targets, the exporter uses `TARGETS` instead.
+3. If neither source provides valid targets, the exporter exits with an error.
+
+Example file served by the source server:
+
+```text
+example.com:443
+10.0.0.1:8080
+[2001:db8::1]:443
+```
+
+Comma-separated targets are also supported. Blank entries are ignored; invalid
+targets are logged and skipped. A file with some valid targets still overrides
+the entire fallback list; the lists are not merged.
+
+The download has a 5-second connection timeout and a 15-second total timeout.
+Failed downloads are discarded, including partially received files. A download
+failure does not fail the init container, allowing the exporter to use its
+fallback targets.
+
+Containers exchange the target list through a file rather than modifying each
+other's environment. This also works with the exporter's shell-free `scratch`
+image. See the [Kubernetes init container documentation](https://kubernetes.io/docs/concepts/workloads/pods/init-containers/#differences-from-regular-containers).
+
+Targets are fetched during Pod initialization only. Changes on the source
+server require recreating the Pod to download the updated list.
+
+### Created resources
 
 This creates:
 
@@ -151,6 +189,22 @@ and on `v*` tags:
 4. Builds and pushes the image with BuildKit and GitHub Actions layer cache.
 
 Pull requests trigger a build-only run (no push).
+
+### End-to-end tests
+
+The separate `.github/workflows/e2e.yaml` workflow runs on pull requests, pushes
+to `main`, and manual dispatch. It builds the exporter image and loads it into
+a disposable kind cluster running Kubernetes **1.36.4**.
+
+An nginx Deployment serves a mounted text file containing its own Pod IP and
+port. The test deploys the real `deployment.yaml` with that target URL, then
+queries the exporter's `/metrics` endpoint from a separate curl Pod. It checks
+that the downloaded target is up, has non-negative latency and successful
+checks, and that the fallback target is absent. It repeats the checks with an
+empty file and an HTTP 404 response to verify fallback to `TARGETS`.
+
+Any failed assertion or rollout timeout fails the job. On failure, Pod details,
+events, nginx logs, and exporter/init-container logs are printed for diagnosis.
 
 ## Repository structure
 
