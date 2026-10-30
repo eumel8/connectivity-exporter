@@ -32,14 +32,19 @@ kubectl patch --local -f deployment.yaml \
 assert_metrics() {
   local expected=$1 forbidden=$2 exporter_ip metrics
   k rollout status deployment/connectivity-exporter --timeout=120s
-  exporter_ip=$(k get pods -l app=connectivity-exporter \
-    -o jsonpath='{.items[0].status.podIP}')
-  # Readiness is not proof of a completed probe; retry assertions for up to 30s.
+  # A completed rollout can still leave terminating predecessor Pods listed.
+  exporter_ip=$(k get pods -l app=connectivity-exporter -o json | python3 -c '
+import json, sys
+pods = [p for p in json.load(sys.stdin)["items"] if not p["metadata"].get("deletionTimestamp")]
+assert len(pods) == 1, f"Expected one active exporter Pod, got {len(pods)}"
+print(pods[0]["status"]["podIP"])
+')
+  # Readiness is not proof of a completed probe; allow up to 15 scrape attempts.
   for attempt in {1..15}; do
     if metrics=$(k exec metrics-client -- curl --fail --silent --show-error \
       --max-time 5 "http://${exporter_ip}:9090/metrics"); then
       if python3 .github/e2e/assert-metrics.py "$expected" "$forbidden" <<< "$metrics"; then
-        printf '%s\n' "$metrics"
+        python3 -c 'import sys; [print(line.rstrip()) for line in sys.stdin if line.startswith("connectivity_")]' <<< "$metrics"
         return 0
       fi
     fi
