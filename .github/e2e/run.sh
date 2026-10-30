@@ -25,7 +25,7 @@ downloaded=$(k exec metrics-client -- curl --fail --silent --show-error \
   --max-time 10 http://nginx/targets.txt)
 test "$downloaded" = "$target"
 
-# Use the real deployment, including its init script and security context.
+# Use the real deployment, including its security context.
 kubectl patch --local -f deployment.yaml \
   --patch-file .github/e2e/exporter-patch.yaml -o yaml | k apply -f -
 
@@ -55,11 +55,43 @@ print(pods[0]["status"]["podIP"])
 
 assert_metrics "$target" "$fallback"
 
-# Recreate the exporter via a template change so the init container runs again.
-k set env deployment/connectivity-exporter --containers=fetch-targets \
+# Change only nginx content: the exporter must reload without a Pod restart.
+before=$(k get pods -l app=connectivity-exporter -o jsonpath='{.items[0].metadata.uid}')
+updated_target="nginx:80"
+k exec deployment/nginx -- sh -ec \
+  'printf "%s\n" "$1" > /usr/share/nginx/html/new.txt; mv /usr/share/nginx/html/new.txt /usr/share/nginx/html/targets.txt' sh "$updated_target"
+assert_metrics "$updated_target" "$target"
+
+# Empty, invalid and missing files must preserve the last accepted list.
+for content in '' 'invalid-target'; do
+  k exec deployment/nginx -- sh -ec \
+    'printf "%s\n" "$1" > /usr/share/nginx/html/targets.txt' sh "$content"
+  sleep 4
+  assert_metrics "$updated_target" "$fallback"
+done
+k exec deployment/nginx -- rm /usr/share/nginx/html/targets.txt
+sleep 4
+assert_metrics "$updated_target" "$fallback"
+
+# Recovery must adopt a new list and then use conditional requests (nginx 304).
+k exec deployment/nginx -- sh -ec \
+  'printf "%s\n" "$1" > /usr/share/nginx/html/targets.txt' sh "$target"
+assert_metrics "$target" "$updated_target"
+sleep 4
+k logs deployment/nginx -c nginx | python3 -c '
+import sys
+logs = sys.stdin.read()
+assert "GET /targets.txt HTTP/1.1\" 304 " in logs, "No conditional HTTP 304 observed"
+'
+after=$(k get pods -l app=connectivity-exporter -o jsonpath='{.items[0].metadata.uid}')
+test "$before" = "$after"
+test "$(k get pods -l app=connectivity-exporter -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}')" = 0
+
+# Startup fallback is still required when no valid download has been accepted.
+k set env deployment/connectivity-exporter \
   TARGETS_URL=http://nginx/empty.txt
 assert_metrics "$fallback" "$target"
 
-k set env deployment/connectivity-exporter --containers=fetch-targets \
+k set env deployment/connectivity-exporter \
   TARGETS_URL=http://nginx/missing.txt
 assert_metrics "$fallback" "$target"

@@ -43,7 +43,6 @@ spec:
           volumeMounts:
             - name: targets
               mountPath: /usr/share/nginx/html
-              readOnly: true
       volumes:
         - name: targets
           emptyDir: {}

@@ -24,48 +24,8 @@ spec:
         runAsNonRoot: true
         runAsUser: 65534
         runAsGroup: 65534
-        fsGroup: 65534
         seccompProfile:
           type: RuntimeDefault
-      initContainers:
-        - name: fetch-targets
-          image: curlimages/curl:8.12.1
-          command: ["/bin/sh", "-ec"]
-          args:
-            - |
-              # Clear previous output in case the init container is restarted.
-              : > /targets/targets.txt
-              if [ -z "$TARGETS_URL" ]; then
-                echo "TARGETS_URL is empty; using deployment TARGETS"
-              elif curl --fail --silent --show-error --location \
-                --connect-timeout 5 --max-time 15 \
-                --output /targets/targets.txt "$TARGETS_URL"; then
-                echo "Target download complete; exporter will validate targets"
-              else
-                # Discard partial downloads so they cannot override TARGETS.
-                : > /targets/targets.txt
-                echo "Target download failed; using deployment TARGETS"
-              fi
-          env:
-            # Optional HTTP(S) URL serving a plain-text target list.
-            - name: TARGETS_URL
-              value: ""
-          volumeMounts:
-            - name: targets
-              mountPath: /targets
-          resources:
-            requests:
-              cpu: 10m
-              memory: 16Mi
-            limits:
-              cpu: 100m
-              memory: 32Mi
-          securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities:
-              drop:
-                - ALL
       containers:
         - name: connectivity-exporter
           image: ghcr.io/eumel8/connectivity-exporter:latest
@@ -80,9 +40,12 @@ spec:
             # Example: "1.2.3.4:443,example.com:80,10.0.0.1:8080,[1234:1:2:3:4::]:443"
             - name: TARGETS
               value: "127.0.0.1:9090"
-            # Downloaded targets take precedence over TARGETS.
-            - name: TARGETS_FILE
-              value: "/targets/targets.txt"
+            # Optional HTTP(S) source; valid downloads override TARGETS.
+            - name: TARGETS_URL
+              value: ""
+            # Refresh interval in seconds, with +/-20% jitter (default: 300).
+            - name: TARGETS_POLL_INTERVAL
+              value: "300"
             # Check interval in seconds (default: 60)
             - name: INTERVAL
               value: "60"
@@ -95,10 +58,6 @@ spec:
             # Log verbosity: debug | info | warn | error (default: info)
             - name: LOG_LEVEL
               value: "info"
-          volumeMounts:
-            - name: targets
-              mountPath: /targets
-              readOnly: true
           resources:
             requests:
               cpu: 10m
@@ -125,6 +84,3 @@ spec:
               drop:
                 - ALL
                 - CAP_NET_RAW
-      volumes:
-        - name: targets
-          emptyDir: {}
